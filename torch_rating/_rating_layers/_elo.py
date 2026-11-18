@@ -1,6 +1,8 @@
 import torch.nn as nn
 import torch
 
+from torch_rating._rating_layers._adapter import PositiveScalar, RatingAdapter
+
 
 class EloLayer(nn.Module):
     """
@@ -52,3 +54,40 @@ class EloLayer(nn.Module):
 
         E_A = 1 - E_H
         return torch.cat([E_A, E_H], dim=0)
+
+
+class EloAdapter(RatingAdapter):
+    """Elo-inspired probability features from latent rating differences."""
+
+    def __init__(
+        self,
+        node_dim: int,
+        rating_dim: int = 8,
+        out_dim: int = 16,
+        learnable_parameters: bool = True,
+        initial_scale: float = 1.0,
+    ):
+        """Set embedding widths and positive sigmoid scale; optionally train scale."""
+        super().__init__(
+            node_dim=node_dim,
+            rating_dim=rating_dim,
+            raw_out_dim=2 * rating_dim,
+            out_dim=out_dim,
+        )
+
+        self.scale = PositiveScalar(
+            initial_scale,
+            learnable=learnable_parameters,
+        )
+
+    def rating_features(self, home_rating, away_rating):
+        """Return away/home probabilities shaped [..., 2 * rating_dim]."""
+        home_probability = torch.sigmoid(
+            self.scale() * (home_rating - away_rating)
+        )
+
+        # Preserve the original package's away-first ordering.
+        return torch.cat(
+            [1.0 - home_probability, home_probability],
+            dim=-1,
+        )

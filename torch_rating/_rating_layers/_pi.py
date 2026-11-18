@@ -1,7 +1,10 @@
 import copy
+import math
 
 import torch.nn as nn
 import torch
+
+from torch_rating._rating_layers._adapter import PositiveScalar, RatingAdapter
 
 
 class PiLayer(nn.Module):
@@ -77,3 +80,72 @@ class _PiFunction(torch.autograd.Function):
 
 # create alias
 _pi_fwd = _PiFunction.apply
+
+
+class PiAdapter(RatingAdapter):
+    """Pi-inspired margin readout using ordinary autograd.
+
+    This is a readout, not the classical Pi state-update rule.
+    """
+
+    def __init__(
+        self,
+        node_dim: int,
+        rating_dim: int = 8,
+        out_dim: int = 16,
+        learnable_parameters: bool = True,
+        c: float = 3.0,
+        max_exponent: float = 3.0,
+    ):
+        """Set even rating width, positive divisor c, and fixed exponent bound."""
+        if rating_dim <= 0 or rating_dim % 2:
+            raise ValueError("Pi rating_dim must be positive and even.")
+        if not 0 < max_exponent <= 10:
+            raise ValueError("max_exponent must be in (0, 10].")
+
+        super().__init__(
+            node_dim=node_dim,
+            rating_dim=rating_dim,
+            raw_out_dim=rating_dim,
+            out_dim=out_dim,
+        )
+
+        self.c = PositiveScalar(c, learnable_parameters)
+
+        self.register_buffer(
+            "max_exponent",
+            torch.tensor(float(max_exponent)),
+        )
+
+    def signed_score(self, rating):
+        """Map ratings to signed scores with bounded exponents; preserve shape."""
+        exponent = math.log(10.0) * rating / self.c()
+
+        # Smoothly bound the exponential argument.
+        # This deliberately modifies the original formula at large magnitudes.
+        exponent = self.max_exponent * torch.tanh(
+            exponent / self.max_exponent
+        )
+
+        # Both branches have derivative 1 at zero.
+        # Unlike sign(x) * expm1(abs(x)), this preserves that gradient.
+        return torch.where(
+            exponent >= 0,
+            torch.expm1(exponent),
+            -torch.expm1(-exponent),
+        )
+
+    def rating_features(self, home_rating, away_rating):
+        """Return opposite away/home margins shaped [..., rating_dim]."""
+        # Select each team's rating for its role in this match.
+        home_at_home, _ = home_rating.chunk(2, dim=-1)
+        _, away_away = away_rating.chunk(2, dim=-1)
+
+        home_margin = (
+            self.signed_score(home_at_home) - self.signed_score(away_away)
+        )
+
+        return torch.cat(
+            [-home_margin, home_margin],
+            dim=-1,
+        )
